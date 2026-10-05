@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f0e7">
+    <meta name="description" content="Explore carpets from Harshit International, serving Mirzapur, Bhadohi, Varanasi and nearby areas.">
+    <title>Harshit International | Carpets for your home</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" type="module"></script>
+  </head>
+  <body>
+    <div class="announcement"><span class="announcement-dot"></span>Serving homes across Mirzapur, Bhadohi & Varanasi</div>
+    <header class="site-header">
+      <a class="brand" href="#home" aria-label="Harshit International home">
+        <span class="brand-mark">HI</span>
+        <span class="brand-copy"><strong id="brand-name">Harshit International</strong><small>CARPETS · MIRZAPUR, UP</small></span>
+      </a>
+      <nav class="main-nav" aria-label="Main navigation">
+        <a href="#home" data-nav="home">Home</a>
+        <a href="#catalog" data-nav="catalog">Shop carpets</a>
+        <a href="#account" data-nav="account">My orders</a>
+      </nav>
+      <div class="header-actions">
+        <a class="icon-link" href="#cart" aria-label="Shopping bag"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14l1 13H4L5 8Z"/><path d="M9 9V6a3 3 0 0 1 6 0v3"/></svg><span class="bag-label">Bag</span><span class="cart-count" id="cart-count">0</span></a>
+        <button class="menu-toggle" id="menu-toggle" aria-label="Open menu" aria-expanded="false"><span></span><span></span></button>
+      </div>
+    </header>
+    <main id="app" tabindex="-1"><div class="loading-state">Opening the showroom…</div></main>
+    <footer class="site-footer">
+      <div class="footer-top">
+        <a class="brand brand-light" href="#home"><span class="brand-mark">HI</span><span class="brand-copy"><strong id="footer-name">Harshit International</strong><small>CARPETS · MIRZAPUR, UP</small></span></a>
+        <p>Thoughtful carpets for the rooms<br>you call your own.</p>
+        <div class="footer-contact" id="footer-contact"></div>
+      </div>
+      <div class="footer-bottom"><span>© <span id="year"></span> <span id="footer-name-short">Harshit International</span></span><span>Mirzapur · Bhadohi · Varanasi · Uttar Pradesh</span><a href="#admin">Store admin</a></div>
+    </footer>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>
