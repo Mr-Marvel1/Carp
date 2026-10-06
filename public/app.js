@@ -36,20 +36,29 @@ async function api(path, options = {}) {
   return content;
 }
 function currentRoute() {
-  const route = location.hash.replace(/^#\/?/, '') || 'home';
+  let route = location.hash.replace(/^#\/?/, '');
+  if (!route) {
+    if (location.pathname === '/shop') route = 'catalog';
+    else if (['/cart', '/checkout', '/account', '/admin'].includes(location.pathname)) route = location.pathname.slice(1);
+    else {
+      const product = location.pathname.match(/^\/products\/(\d+)$/);
+      route = product ? `product/${product[1]}` : 'home';
+    }
+  }
   const [page, id] = route.split('/');
   return { page, id: id ? Number(id) : null };
 }
 function productImage(product, className = 'product-image') {
   const alt = escapeHtml(product.name || 'Carpet');
+  const placeholder = `<div class="woven-placeholder" aria-label="Carpet preview"${product.image_url ? ' hidden' : ''}><span>${escapeHtml((product.category || 'Carpet').slice(0, 20))}</span></div>`;
   const image = product.image_url
-    ? `<img src="${escapeHtml(product.image_url)}" alt="${alt}" loading="lazy" onerror="this.remove()">`
-    : `<div class="woven-placeholder" aria-label="Carpet preview"><span>${escapeHtml((product.category || 'Carpet').slice(0, 20))}</span></div>`;
-  return `<div class="${className}">${image}${product.stock === 0 ? '<span class="stock-label">Currently unavailable</span>' : ''}</div>`;
+    ? `<img src="${escapeHtml(product.image_url)}" alt="${alt}" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false">`
+    : '';
+  return `<div class="${className}">${image}${placeholder}${product.stock === 0 ? '<span class="stock-label">Currently unavailable</span>' : ''}</div>`;
 }
 function productCard(product) {
   return `<article class="product-card">
-    <a href="#product/${product.id}" aria-label="View ${escapeHtml(product.name)}">${productImage(product)} </a>
+    <a href="#product/${product.id}" aria-label="View ${escapeHtml(product.name)}">${productImage(product)}${product.is_demo ? '<span class="demo-ribbon">DEMO · DEVELOPMENT ONLY</span>' : ''}</a>
     <div class="product-meta"><p class="product-category">${escapeHtml(product.category)}${product.size ? ` · ${escapeHtml(product.size)}` : ''}</p>
       <a class="product-name" href="#product/${product.id}">${escapeHtml(product.name)}</a>
       <div class="product-bottom"><span class="product-price">${money.format(product.price)}</span>
@@ -64,24 +73,24 @@ function productGrid(products) {
 }
 function homePage() {
   const featured = state.products.slice(0, 4);
-  return `<section class="hero">
-    <div class="hero-copy-block"><p class="eyebrow">A little more warmth, every day</p>
-      <h1>Make room for<br><em>something beautiful.</em></h1>
-      <p class="hero-copy">Find a carpet that feels right at home. Browse the collection from ${escapeHtml(state.config.storeName)}, serving ${escapeHtml(state.config.serviceAreas.join(', '))} and nearby.</p>
-      <div class="hero-actions"><a class="button" href="#catalog">Explore carpets ${icon('arrow')}</a><a class="text-link" href="#catalog">Browse the collection</a></div>
+  const demoCount = state.products.filter((product) => product.is_demo).length;
+  return `<section class="home-masthead">
+    <div class="home-hero-copy"><p class="eyebrow">Carpets for living, from ${escapeHtml(state.config.serviceAreas[0] || 'Uttar Pradesh')}</p>
+      <h1>Ground your<br>room in <em>colour.</em></h1>
+      <p>Find a pattern, texture and size that feels like yours. Browse the current ${escapeHtml(state.config.storeName)} collection with no sign-in required.</p>
+      <form class="hero-search" id="hero-search"><label class="sr-only" for="hero-query">Search carpets</label><input id="hero-query" name="q" type="search" placeholder="Try “cotton”, “runner”, “blue”…"><button aria-label="Search carpets">${icon('arrow')}</button></form>
+      <div class="home-hero-links"><a class="button" href="#catalog">Shop all carpets ${icon('arrow')}</a><span>Local service · ${escapeHtml(state.config.serviceAreas.slice(0, 3).join(' · '))}</span></div>
     </div>
-    <div class="hero-visual" role="img" aria-label="Warm, patterned rug in a living room"><div class="hero-stamp"><strong>घर</strong><span>made for living</span></div></div>
+    <div class="home-hero-photo" role="img" aria-label="A patterned carpet in a warm, considered living space"><span class="photo-label">TEXTURE FOR EVERYDAY LIVING</span><span class="photo-caption">A softer place<br>to land.</span></div>
   </section>
-  <section class="trust-strip" aria-label="Store benefits">
-    <div class="trust-item"><span class="trust-icon"><svg viewBox="0 0 24 24"><path d="M3 7h11v10H3zM14 10h4l3 3v4h-7zM7 20a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm11 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z"/></svg></span>Local delivery, arranged with you</div>
-    <div class="trust-item"><span class="trust-icon"><svg viewBox="0 0 24 24"><path d="M12 3 4 7v5c0 5 3.5 8 8 9 4.5-1 8-4 8-9V7l-8-4Z"/><path d="m8 12 2.5 2.5L16 9"/></svg></span>Order directly with our team</div>
-    <div class="trust-item"><span class="trust-icon"><svg viewBox="0 0 24 24"><path d="M4 7h16M6 4v6m12-6v6M5 11h14v9H5zM8 15h3"/></svg></span>See your order status anytime</div>
-  </section>
-  <section class="section"><div class="section-head"><div><p class="eyebrow">The showroom</p><h2>Carpets to come home to</h2><p>Explore the pieces currently available from our collection.</p></div><a class="text-link" href="#catalog">View all carpets ${icon('arrow')}</a></div>${productGrid(featured)}</section>
-  <section class="craft-band"><div><h2>Serving the carpet towns and homes of Uttar Pradesh.</h2><p>Local orders are confirmed personally, with delivery details agreed before dispatch.</p></div><a class="button" href="#catalog">Find your carpet ${icon('arrow')}</a></section>`;
+  ${demoCount ? `<div class="demo-notice"><strong>Development preview</strong><span>${demoCount} demo carpets · Not for sale · Replaced with verified product details before launch</span></div>` : ''}
+  <div class="local-promise"><span>Harshit International</span><span>Mirzapur</span><span>Bhadohi</span><span>Varanasi</span><span>Easy local ordering</span></div>
+  ${state.categories.length ? `<section class="home-categories section"><div class="section-head"><div><p class="eyebrow">Start somewhere</p><h2>Shop by style</h2></div><a class="text-link" href="#catalog">All carpets ${icon('arrow')}</a></div><div class="category-links">${state.categories.map((category, index) => `<a class="category-link category-tone-${index % 4}" href="#catalog?category=${encodeURIComponent(category)}"><span class="category-number">0${index + 1}</span><strong>${escapeHtml(category)}</strong>${icon('arrow')}</a>`).join('')}</div></section>` : ''}
+  <section class="section home-collection"><div class="section-head"><div><p class="eyebrow">On the floor now</p><h2>Find your kind of cosy</h2><p>Every item comes from the live store catalog.</p></div><a class="text-link" href="#catalog">View the collection ${icon('arrow')}</a></div>${productGrid(featured)}</section>
+  <section class="home-local"><div class="home-local-image" role="img" aria-label="Detail of a woven rug"></div><div class="home-local-copy"><p class="eyebrow">Your nearby carpet shop</p><h2>Made for your home.<br>Ordered close to home.</h2><p>Browse freely, choose at your pace, and share your delivery details only when you’re ready to place an order. Our team will confirm delivery and payment with you.</p><a class="button button-light" href="#catalog">Explore carpets ${icon('arrow')}</a></div></section>`;
 }
 function catalogPage() {
-  const query = new URLSearchParams(location.hash.split('?')[1] || '');
+  const query = new URLSearchParams(location.hash.split('?')[1] || location.search.slice(1));
   const search = query.get('q') || '';
   const category = query.get('category') || '';
   const min = query.get('min') || '';
@@ -94,7 +103,7 @@ function catalogPage() {
   if (max) url.set('max', max);
   if (sort !== 'newest') url.set('sort', sort);
   const result = state.filteredProducts || state.products;
-  return `<div class="page-shell"><div class="page-heading"><p class="eyebrow">Find your fit</p><h1 class="page-title">The carpet collection</h1><p class="page-subtitle">Browse at your own pace. No account needed until you’re ready to order.</p></div>
+  return `<div class="page-shell catalog-shell"><div class="catalog-banner"><p class="eyebrow">Harshit International · Mirzapur, UP</p><h1 class="page-title">The carpet collection<span>.</span></h1><p class="page-subtitle">Browse by feel, fibre or favourite colour. No account needed.</p></div>
     <form class="filter-bar" id="filter-form"><div class="field filter-search"><label for="filter-q">Search carpets</label><input id="filter-q" class="filter-control" name="q" value="${escapeHtml(search)}" placeholder="Try a colour, material or style"></div>
       <div class="field filter-small"><label for="filter-category">Category</label><select class="filter-control" id="filter-category" name="category"><option value="">All categories</option>${state.categories.map((value) => `<option ${value === category ? 'selected' : ''} value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join('')}</select></div>
       <div class="field filter-small"><label for="filter-sort">Sort by</label><select class="filter-control" id="filter-sort" name="sort"><option value="newest" ${sort === 'newest' ? 'selected' : ''}>Recently added</option><option value="price-asc" ${sort === 'price-asc' ? 'selected' : ''}>Price: low to high</option><option value="price-desc" ${sort === 'price-desc' ? 'selected' : ''}>Price: high to low</option></select></div>
@@ -106,7 +115,7 @@ function catalogPage() {
 function detailPage(id) {
   const product = state.products.find((item) => item.id === id);
   if (!product) return `<div class="page-shell"><div class="empty-state"><strong>We couldn’t find that carpet.</strong><p>It may have been removed from the collection.</p><a class="button button-small" href="#catalog">Back to carpets</a></div></div>`;
-  return `<div class="page-shell"><p class="eyebrow"><a href="#catalog">Carpet collection</a> / ${escapeHtml(product.category)}</p><div class="detail-layout">${productImage(product)}<div class="detail-info"><p class="product-category">${escapeHtml(product.category)}</p><h1>${escapeHtml(product.name)}</h1><p class="detail-price">${money.format(product.price)}</p><p class="detail-description">${escapeHtml(product.description || 'Ask us for details about this carpet, including delivery and care.')}</p>
+  return `<div class="page-shell"><p class="eyebrow"><a href="#catalog">Carpet collection</a> / ${escapeHtml(product.category)}</p><div class="detail-layout">${productImage(product)}<div class="detail-info">${product.is_demo ? '<p class="demo-inline">DEVELOPMENT DEMO · NOT FOR SALE</p>' : ''}<p class="product-category">${escapeHtml(product.category)}</p><h1>${escapeHtml(product.name)}</h1><p class="detail-price">${money.format(product.price)}</p><p class="detail-description">${escapeHtml(product.description || 'Ask us for details about this carpet, including delivery and care.')}</p>
     <div class="spec-list">${[['Material', product.material], ['Colour', product.color], ['Size', product.size], ['Available', product.stock > 0 ? `${product.stock} in stock` : 'Currently unavailable']].filter((row) => row[1]).map(([key, value]) => `<div class="spec-row"><span>${key}</span><strong>${escapeHtml(value)}</strong></div>`).join('')}</div>
     <div class="quantity-control"><button data-quantity="-1" aria-label="Decrease quantity">−</button><span id="detail-quantity">${state.detailQuantity}</span><button data-quantity="1" aria-label="Increase quantity">+</button></div><button class="button" data-add="${product.id}" ${product.stock < 1 ? 'disabled' : ''}>Add to bag ${icon('arrow')}</button>
     <p class="page-subtitle">Delivery details for ${escapeHtml(state.config.serviceAreas.join(', '))} are confirmed with you after ordering.</p></div></div></div>`;
@@ -183,7 +192,7 @@ async function loadAdminTab() {
   try {
     if (state.adminTab === 'products') {
       const products = await api('/api/admin/products');
-      target.innerHTML = `<div class="admin-toolbar"><h2>Products <span style="color:var(--muted);font:400 13px var(--sans)">(${products.length})</span></h2><button class="button button-small" data-new-product>${icon('plus')} Add carpet</button></div>${products.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Carpet</th><th>Category</th><th>Price</th><th>Stock</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>${products.map((product) => `<tr><td><strong>${escapeHtml(product.name)}</strong></td><td>${escapeHtml(product.category)}</td><td>${money.format(product.price)}</td><td>${product.stock}</td><td>${product.is_active ? 'Listed' : 'Hidden'}</td><td><div class="table-actions"><button class="icon-button" data-edit-product="${product.id}" aria-label="Edit ${escapeHtml(product.name)}" title="Edit">✎</button>${product.is_active ? `<button class="icon-button" data-hide-product="${product.id}" aria-label="Hide ${escapeHtml(product.name)}" title="Hide">×</button>` : ''}</div></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-state"><strong>No carpets in the catalog yet.</strong><p>Add Harshit International’s actual inventory here. The public storefront will update automatically.</p></div>'}`;
+      target.innerHTML = `<div class="admin-toolbar"><h2>Products <span style="color:var(--muted);font:400 13px var(--sans)">(${products.length})</span></h2><button class="button button-small" data-new-product>${icon('plus')} Add carpet</button></div>${products.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Carpet</th><th>Category</th><th>Price</th><th>Stock</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>${products.map((product) => `<tr><td><strong>${escapeHtml(product.name)}</strong>${product.is_demo ? '<span class="admin-demo-tag">DEMO · DEV ONLY</span>' : ''}</td><td>${escapeHtml(product.category)}</td><td>${money.format(product.price)}</td><td>${product.stock}</td><td>${product.is_active ? 'Listed' : 'Hidden'}</td><td><div class="table-actions"><button class="icon-button" data-edit-product="${product.id}" aria-label="Edit ${escapeHtml(product.name)}" title="Edit">✎</button>${product.is_active ? `<button class="icon-button" data-hide-product="${product.id}" aria-label="Hide ${escapeHtml(product.name)}" title="Hide">×</button>` : ''}</div></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-state"><strong>No carpets in the catalog yet.</strong><p>Add Harshit International’s actual inventory here. The public storefront will update automatically.</p></div>'}`;
     } else if (state.adminTab === 'orders') {
       const orders = await api('/api/admin/orders');
       target.innerHTML = `<div class="admin-toolbar"><h2>Orders <span style="color:var(--muted);font:400 13px var(--sans)">(${orders.length})</span></h2></div>${orders.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Order</th><th>Customer</th><th>Items</th><th>Total</th><th>Delivery</th><th>Status</th></tr></thead><tbody>${orders.map((order) => `<tr><td><strong>#${order.id}</strong><br>${new Date(order.created_at + 'Z').toLocaleDateString('en-IN')}</td><td>${escapeHtml(order.customer_name)}<br>${escapeHtml(order.phone)}</td><td>${order.items.map((item) => `${escapeHtml(item.product_name)} × ${item.quantity}`).join('<br>')}</td><td>${money.format(order.total)}</td><td>${escapeHtml(order.address)}, ${escapeHtml(order.city)} ${escapeHtml(order.pincode)}</td><td><select data-order-status="${order.id}" aria-label="Order ${order.id} status">${['pending', 'confirmed', 'dispatched', 'delivered', 'cancelled'].map((status) => `<option value="${status}" ${status === order.status ? 'selected' : ''}>${status}</option>`).join('')}</select></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty-state"><strong>No orders received.</strong><p>Customer orders will be listed here.</p></div>'}`;
@@ -268,7 +277,11 @@ document.addEventListener('change', async (event) => {
 });
 document.addEventListener('submit', async (event) => {
   const form = event.target;
-  if (form.id === 'filter-form') {
+  if (form.id === 'hero-search') {
+    event.preventDefault();
+    const query = new URLSearchParams(new FormData(form)).toString();
+    location.hash = `#catalog${query ? `?${query}` : ''}`;
+  } else if (form.id === 'filter-form') {
     event.preventDefault();
     const params = new URLSearchParams(new FormData(form));
     for (const [key, value] of [...params]) if (!value) params.delete(key);

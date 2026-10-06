@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -12,19 +13,32 @@ let baseUrl;
 let output = '';
 let customerCookie;
 let adminCookie;
+let sessionSecret;
+let adminPassword;
+let customerPassword;
 
 before(async () => {
   directory = await mkdtemp(join(tmpdir(), 'harshit-store-'));
+  sessionSecret = randomBytes(32).toString('hex');
+  adminPassword = randomBytes(24).toString('base64url');
+  customerPassword = randomBytes(24).toString('base64url');
   child = spawn(process.execPath, ['server.mjs'], {
     cwd: process.cwd(),
     env: {
       ...process.env,
       PORT: '0',
       HOST: '127.0.0.1',
+      VERCEL: '',
+      SUPABASE_DB_URL: '',
+      DATABASE_URL: '',
+      PG_CA_CERT: '',
+      PG_CA_CERT_PATH: '',
       DATABASE_PATH: join(directory, 'store.sqlite'),
-      SESSION_SECRET: 'integration-test-secret',
+      SESSION_SECRET: sessionSecret,
+      NODE_ENV: 'development',
+      HIDE_DEMO_PRODUCTS: '1',
       ADMIN_EMAIL: 'admin@example.test',
-      ADMIN_PASSWORD: 'integration-admin-password'
+      ADMIN_PASSWORD: adminPassword
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -75,8 +89,44 @@ test('fresh catalog, local order lifecycle, and admin inventory', async () => {
   assert.equal(storefront.status, 200);
   assert.match(await storefront.text(), /Harshit International/);
 
+  for (const path of ['/shop', '/products/1', '/cart']) {
+    const page = await fetch(`${baseUrl}${path}`);
+    assert.equal(page.status, 200, `${path} should be served by the frontend router`);
+    assert.match(page.headers.get('content-type') || '', /text\/html/);
+  }
+
   const catalog = await request('/api/products');
   assert.deepEqual(catalog.data.products, []);
+
+  const missingProduct = await request('/api/products/1');
+  assert.equal(missingProduct.response.status, 404);
+  assert.equal(missingProduct.data.error, 'Carpet not found.');
+
+  const nestedAuth = await request('/api/auth/login', { method: 'POST', body: {} });
+  assert.equal(nestedAuth.response.status, 400);
+  assert.match(nestedAuth.response.headers.get('content-type') || '', /application\/json/);
+
+  const nestedAdmin = await request('/api/admin/products');
+  assert.equal(nestedAdmin.response.status, 401);
+  assert.equal(nestedAdmin.data.error, 'Sign in to continue.');
+
+  const databasePath = join(directory, 'store.sqlite');
+  const rejectedSeed = spawnSync(process.execPath, ['scripts/seed-demo.mjs'], {
+    cwd: process.cwd(),
+    env: { ...process.env, VERCEL: '', SUPABASE_DB_URL: '', DATABASE_URL: '', DATABASE_PATH: databasePath, NODE_ENV: 'production', ALLOW_DEMO_SEED: '1' },
+    encoding: 'utf8'
+  });
+  assert.notEqual(rejectedSeed.status, 0);
+  assert.match(rejectedSeed.stderr, /Demo seeding is disabled/);
+
+  const seeded = spawnSync(process.execPath, ['scripts/seed-demo.mjs'], {
+    cwd: process.cwd(),
+    env: { ...process.env, VERCEL: '', SUPABASE_DB_URL: '', DATABASE_URL: '', DATABASE_PATH: databasePath, NODE_ENV: 'development', ALLOW_DEMO_SEED: '1' },
+    encoding: 'utf8'
+  });
+  assert.equal(seeded.status, 0, seeded.stderr);
+  assert.match(seeded.stdout, /24 demo carpets added/);
+  assert.deepEqual((await request('/api/products')).data.products, []);
 
   const unauthenticatedOrder = await request('/api/orders', {
     method: 'POST', body: { items: [{ id: 1, quantity: 1 }] }
@@ -85,18 +135,27 @@ test('fresh catalog, local order lifecycle, and admin inventory', async () => {
 
   const registered = await request('/api/auth/register', {
     method: 'POST',
-    body: { name: 'Local Customer', email: 'customer@example.test', phone: '9876543210', password: 'customer-password' }
+    body: { name: 'Local Customer', email: 'customer@example.test', phone: '9876543210', password: customerPassword }
   });
   assert.equal(registered.response.status, 200);
   customerCookie = registered.cookie;
   assert.ok(customerCookie);
 
   const adminLogin = await request('/api/auth/login', {
-    method: 'POST', body: { email: 'admin@example.test', password: 'integration-admin-password' }
+    method: 'POST', body: { email: 'admin@example.test', password: adminPassword }
   });
   assert.equal(adminLogin.response.status, 200);
   assert.equal(adminLogin.data.user.role, 'admin');
   adminCookie = adminLogin.cookie;
+
+  const allProducts = await request('/api/admin/products', { cookie: adminCookie });
+  const demoProducts = allProducts.data.filter((product) => product.is_demo === 1);
+  assert.equal(demoProducts.length, 24);
+  const demoOrder = await request('/api/orders', {
+    method: 'POST', cookie: customerCookie,
+    body: { recipient: 'Local Customer', phone: '9876543210', address: 'Main Road', city: 'Mirzapur', pincode: '231001', items: [{ id: demoProducts[0].id, quantity: 1 }] }
+  });
+  assert.equal(demoOrder.response.status, 409);
 
   const created = await request('/api/admin/products', {
     method: 'POST', cookie: adminCookie,
@@ -118,7 +177,7 @@ test('fresh catalog, local order lifecycle, and admin inventory', async () => {
   const cancelled = await request(`/api/admin/orders/${order.data.id}`, { method: 'PATCH', cookie: adminCookie, body: { status: 'cancelled' } });
   assert.equal(cancelled.response.status, 200);
   const inventory = await request('/api/admin/products', { cookie: adminCookie });
-  assert.equal(inventory.data[0].stock, 3);
+  assert.equal(inventory.data.find((product) => product.name === 'Test rug').stock, 3);
 
   const customers = await request('/api/admin/customers', { cookie: adminCookie });
   assert.equal(customers.data.length, 1);

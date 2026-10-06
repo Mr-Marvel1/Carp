@@ -1,3 +1,12 @@
 .env
+.env.*
+!.env.example
+certs/
+*.pem
+*.crt
+*.key
 data/
 node_modules/
+.vercel/
+.vercel
+.env*

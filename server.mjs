@@ -1,26 +1,24 @@
 import { createServer } from 'node:http';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import { mkdirSync, readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
+import { createDatabase } from './database.mjs';
+import { migrateDatabase } from './scripts/migrate.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const publicRoot = join(root, 'public');
-const databasePath = resolve(process.env.DATABASE_PATH || join(root, 'data', 'store.sqlite'));
-if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
-  throw new Error('SESSION_SECRET must be set in production.');
+if (process.env.NODE_ENV === 'production' && (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32)) {
+  throw new Error('SESSION_SECRET must be at least 32 characters in production.');
 }
 const sessionSecret = process.env.SESSION_SECRET || randomBytes(32).toString('hex');
 const secureCookie = process.env.NODE_ENV === 'production' ? '; Secure' : '';
+const hideDemoProducts = process.env.NODE_ENV === 'production' || process.env.HIDE_DEMO_PRODUCTS === '1';
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || '127.0.0.1';
 
-mkdirSync(dirname(databasePath), { recursive: true });
-const db = new DatabaseSync(databasePath);
-db.exec(`
-  PRAGMA foreign_keys = ON;
-  PRAGMA journal_mode = WAL;
+const db = createDatabase();
+if (db.dialect === 'sqlite') await db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
@@ -74,6 +72,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS orders_user_idx ON orders(user_id);
   CREATE INDEX IF NOT EXISTS products_active_idx ON products(is_active);
 `);
+await migrateDatabase(db);
 
 const productFields = ['name', 'description', 'category', 'material', 'color', 'size', 'price', 'stock', 'image_url'];
 const orderStatuses = new Set(['pending', 'confirmed', 'dispatched', 'delivered', 'cancelled']);
@@ -91,40 +90,40 @@ function checkPassword(password, stored) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-function bootstrapAdmin() {
+async function bootstrapAdmin() {
   const email = process.env.ADMIN_EMAIL?.trim().toLowerCase();
   const password = process.env.ADMIN_PASSWORD;
   if (!email || !password) return;
   if (password.length < 12) throw new Error('ADMIN_PASSWORD must be at least 12 characters.');
-  const existing = db.prepare('SELECT role FROM users WHERE email = ?').get(email);
+  const existing = await db.prepare('SELECT role FROM users WHERE email = ?').get(email);
   if (existing) {
     if (existing.role !== 'admin') console.warn('ADMIN_EMAIL belongs to a customer; choose an unused email to create the admin account.');
     return;
   }
-  db.prepare('INSERT INTO users (name, email, phone, password_hash, role) VALUES (?, ?, ?, ?, ?)')
+  await db.prepare('INSERT INTO users (name, email, phone, password_hash, role) VALUES (?, ?, ?, ?, ?) ON CONFLICT (email) DO NOTHING')
     .run('Store administrator', email, '', hashPassword(password), 'admin');
 }
 
-bootstrapAdmin();
+await bootstrapAdmin();
 
 function json(response, status, data, headers = {}) {
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   response.end(JSON.stringify(data));
 }
 
-function currentUser(request) {
+async function currentUser(request) {
   const cookie = request.headers.cookie || '';
   const token = cookie.match(/(?:^|;\s*)carpy_session=([a-f0-9]+)/)?.[1];
   if (!token) return null;
   const tokenHash = createHash('sha256').update(`${sessionSecret}:${token}`).digest('hex');
-  const session = db.prepare(`SELECT users.id, users.name, users.email, users.phone, users.role
+  const session = await db.prepare(`SELECT users.id, users.name, users.email, users.phone, users.role
     FROM sessions JOIN users ON users.id = sessions.user_id
     WHERE sessions.token_hash = ? AND sessions.expires_at > ?`).get(tokenHash, Date.now());
   return session || null;
 }
 
-function requireUser(request, response, admin = false) {
-  const user = currentUser(request);
+async function requireUser(request, response, admin = false) {
+  const user = await currentUser(request);
   if (!user) {
     json(response, 401, { error: 'Sign in to continue.' });
     return null;
@@ -165,10 +164,10 @@ function limited(request) {
   return attempt.count > 12;
 }
 
-function createSession(userId) {
+async function createSession(userId) {
   const token = randomBytes(32).toString('hex');
   const tokenHash = createHash('sha256').update(`${sessionSecret}:${token}`).digest('hex');
-  db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
+  await db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
     .run(tokenHash, userId, Date.now() + 30 * 24 * 60 * 60 * 1000);
   return `carpy_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000${secureCookie}`;
 }
@@ -193,15 +192,18 @@ function productSqlValues(product) {
   return productFields.map((key) => product[key]);
 }
 
-function adminOrderRows() {
-  const orders = db.prepare(`SELECT orders.*, users.name AS customer_name, users.email AS customer_email
+async function adminOrderRows() {
+  const orders = await db.prepare(`SELECT orders.*, users.name AS customer_name, users.email AS customer_email
     FROM orders JOIN users ON users.id = orders.user_id ORDER BY orders.created_at DESC`).all();
   const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?');
-  return orders.map((order) => ({ ...order, items: items.all(order.id) }));
+  return Promise.all(orders.map(async (order) => ({ ...order, items: await items.all(order.id) })));
 }
 
 function serveStatic(request, response, pathname) {
-  const requested = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
+  const isFrontendRoute = pathname === '/shop'
+    || ['/cart', '/checkout', '/account', '/admin'].includes(pathname)
+    || /^\/products\/\d+$/.test(pathname);
+  const requested = pathname === '/' || isFrontendRoute ? 'index.html' : decodeURIComponent(pathname.slice(1));
   const file = resolve(publicRoot, requested);
   const fromRoot = relative(publicRoot, file);
   if (fromRoot.startsWith('..') || isAbsolute(fromRoot)) return json(response, 404, { error: 'Not found.' });
@@ -233,10 +235,11 @@ export const server = createServer(async (request, response) => {
       });
     }
     if (request.method === 'GET' && pathname === '/api/products') {
-      const where = ['is_active = 1'];
+      const where = hideDemoProducts ? ['is_active = 1', 'is_demo = 0'] : ['is_active = 1'];
       const values = [];
       if (url.searchParams.has('q')) {
-        where.push('(name LIKE ? OR category LIKE ? OR material LIKE ? OR color LIKE ?)');
+        const matchOperator = db.dialect === 'postgres' ? 'ILIKE' : 'LIKE';
+        where.push(`(name ${matchOperator} ? OR category ${matchOperator} ? OR material ${matchOperator} ? OR color ${matchOperator} ?)`);
         const query = `%${url.searchParams.get('q').slice(0, 80)}%`;
         values.push(query, query, query, query);
       }
@@ -254,15 +257,16 @@ export const server = createServer(async (request, response) => {
       }
       const sort = url.searchParams.get('sort');
       const order = sort === 'price-asc' ? 'price ASC' : sort === 'price-desc' ? 'price DESC' : 'created_at DESC';
-      const products = db.prepare(`SELECT * FROM products WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT 200`).all(...values);
-      const categories = db.prepare('SELECT DISTINCT category FROM products WHERE is_active = 1 ORDER BY category').all().map((row) => row.category);
+      const products = await db.prepare(`SELECT * FROM products WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT 200`).all(...values);
+      const categoryRows = await db.prepare(`SELECT DISTINCT category FROM products WHERE is_active = 1${hideDemoProducts ? ' AND is_demo = 0' : ''} ORDER BY category`).all();
+      const categories = categoryRows.map((row) => row.category);
       return json(response, 200, { products, categories });
     }
     if (request.method === 'GET' && /^\/api\/products\/\d+$/.test(pathname)) {
-      const product = db.prepare('SELECT * FROM products WHERE id = ? AND is_active = 1').get(Number(pathname.split('/').at(-1)));
+      const product = await db.prepare(`SELECT * FROM products WHERE id = ? AND is_active = 1${hideDemoProducts ? ' AND is_demo = 0' : ''}`).get(Number(pathname.split('/').at(-1)));
       return product ? json(response, 200, product) : json(response, 404, { error: 'Carpet not found.' });
     }
-    if (request.method === 'GET' && pathname === '/api/session') return json(response, 200, { user: currentUser(request) });
+    if (request.method === 'GET' && pathname === '/api/session') return json(response, 200, { user: await currentUser(request) });
 
     if (request.method === 'POST' && ['/api/auth/register', '/api/auth/login'].includes(pathname)) {
       if (limited(request)) return json(response, 429, { error: 'Too many attempts. Try again in a minute.' });
@@ -276,35 +280,34 @@ export const server = createServer(async (request, response) => {
         const phone = String(body.phone || '').trim();
         if (!name || name.length > 120 || !phone || phone.length > 32) return json(response, 400, { error: 'Enter your name and phone number.' });
         try {
-          const result = db.prepare('INSERT INTO users (name, email, phone, password_hash) VALUES (?, ?, ?, ?)')
-            .run(name, email, phone, hashPassword(password));
-          user = db.prepare('SELECT id, name, email, phone, role FROM users WHERE id = ?').get(result.lastInsertRowid);
+          const result = await db.prepare('INSERT INTO users (name, email, phone, password_hash) VALUES (?, ?, ?, ?) RETURNING id')
+            .get(name, email, phone, hashPassword(password));
+          user = await db.prepare('SELECT id, name, email, phone, role FROM users WHERE id = ?').get(result.id);
         } catch (error) {
-          if (String(error.message).includes('UNIQUE')) return json(response, 409, { error: 'An account already exists for this email.' });
+          if (error.code === '23505' || String(error.message).includes('UNIQUE')) return json(response, 409, { error: 'An account already exists for this email.' });
           throw error;
         }
       } else {
-        const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+        const row = await db.prepare('SELECT * FROM users WHERE email = ?').get(email);
         if (!row || !checkPassword(password, row.password_hash)) return json(response, 401, { error: 'Email or password is incorrect.' });
         user = { id: row.id, name: row.name, email: row.email, phone: row.phone, role: row.role };
       }
-      return json(response, 200, { user }, { 'Set-Cookie': createSession(user.id) });
+      return json(response, 200, { user }, { 'Set-Cookie': await createSession(user.id) });
     }
     if (request.method === 'POST' && pathname === '/api/auth/logout') {
-      const user = currentUser(request);
       const token = request.headers.cookie?.match(/(?:^|;\s*)carpy_session=([a-f0-9]+)/)?.[1];
-      if (token) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(createHash('sha256').update(`${sessionSecret}:${token}`).digest('hex'));
+      if (token) await db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(createHash('sha256').update(`${sessionSecret}:${token}`).digest('hex'));
       return json(response, 200, { user: null }, { 'Set-Cookie': `carpy_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secureCookie}` });
     }
     if (request.method === 'GET' && pathname === '/api/orders') {
-      const user = requireUser(request, response);
+      const user = await requireUser(request, response);
       if (!user) return;
-      const orders = db.prepare('SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC').all(user.id);
+      const orders = await db.prepare('SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC').all(user.id);
       const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?');
-      return json(response, 200, orders.map((order) => ({ ...order, items: items.all(order.id) })));
+      return json(response, 200, await Promise.all(orders.map(async (order) => ({ ...order, items: await items.all(order.id) }))));
     }
     if (request.method === 'POST' && pathname === '/api/orders') {
-      const user = requireUser(request, response);
+      const user = await requireUser(request, response);
       if (!user) return;
       const body = await readJson(request);
       const recipient = String(body.recipient || '').trim();
@@ -314,85 +317,80 @@ export const server = createServer(async (request, response) => {
       const pincode = String(body.pincode || '').trim();
       if (!recipient || !phone || !address || !city || !/^\d{6}$/.test(pincode)) return json(response, 400, { error: 'Complete the delivery details with a valid 6-digit PIN code.' });
       if (!Array.isArray(body.items) || body.items.length < 1 || body.items.length > 40) return json(response, 400, { error: 'Your cart is empty or has too many items.' });
-      db.exec('BEGIN IMMEDIATE');
       try {
+        const orderId = await db.transaction(async (transaction) => {
         let total = 0;
         const lines = [];
         for (const item of body.items) {
           const id = Number(item.id);
           const quantity = Number(item.quantity);
           if (!Number.isSafeInteger(id) || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > 99) throw Object.assign(new Error('Invalid item quantity.'), { status: 400 });
-          const product = db.prepare('SELECT id, name, price, stock FROM products WHERE id = ? AND is_active = 1').get(id);
+          const product = await transaction.prepare(`SELECT id, name, price, stock FROM products WHERE id = ? AND is_active = 1${hideDemoProducts ? ' AND is_demo = 0' : ''}`).get(id);
           if (!product || product.stock < quantity) throw Object.assign(new Error(`${product?.name || 'A carpet'} is no longer available in that quantity.`), { status: 409 });
           total += product.price * quantity;
           lines.push({ ...product, quantity });
         }
-        const result = db.prepare(`INSERT INTO orders (user_id, total, recipient, phone, address, city, pincode, note)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(user.id, total, recipient, phone, address, city, pincode, String(body.note || '').trim().slice(0, 500));
-        const insertItem = db.prepare('INSERT INTO order_items (order_id, product_id, product_name, unit_price, quantity) VALUES (?, ?, ?, ?, ?)');
-        const decrement = db.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?');
+        const result = await transaction.prepare(`INSERT INTO orders (user_id, total, recipient, phone, address, city, pincode, note)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`).get(user.id, total, recipient, phone, address, city, pincode, String(body.note || '').trim().slice(0, 500));
+        const insertItem = transaction.prepare('INSERT INTO order_items (order_id, product_id, product_name, unit_price, quantity) VALUES (?, ?, ?, ?, ?)');
+        const decrement = transaction.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?');
         for (const item of lines) {
-          insertItem.run(result.lastInsertRowid, item.id, item.name, item.price, item.quantity);
-          const changed = decrement.run(item.quantity, item.id, item.quantity);
+          await insertItem.run(result.id, item.id, item.name, item.price, item.quantity);
+          const changed = await decrement.run(item.quantity, item.id, item.quantity);
           if (changed.changes !== 1) throw Object.assign(new Error(`${item.name} just sold out. Please refresh your cart.`), { status: 409 });
         }
-        db.exec('COMMIT');
-        return json(response, 201, { id: Number(result.lastInsertRowid), total });
+        return { id: Number(result.id), total };
+        });
+        return json(response, 201, orderId);
       } catch (error) {
-        db.exec('ROLLBACK');
         throw error;
       }
     }
 
     if (pathname.startsWith('/api/admin/')) {
-      const admin = requireUser(request, response, true);
+      const admin = await requireUser(request, response, true);
       if (!admin) return;
       if (request.method === 'GET' && pathname === '/api/admin/products') {
-        return json(response, 200, db.prepare('SELECT * FROM products ORDER BY created_at DESC').all());
+        return json(response, 200, await db.prepare('SELECT * FROM products ORDER BY created_at DESC').all());
       }
       if (request.method === 'POST' && pathname === '/api/admin/products') {
         const product = productFromBody(await readJson(request));
-        const result = db.prepare(`INSERT INTO products (${productFields.join(', ')}) VALUES (${productFields.map(() => '?').join(', ')})`).run(...productSqlValues(product));
-        return json(response, 201, { id: Number(result.lastInsertRowid) });
+        const result = await db.prepare(`INSERT INTO products (${productFields.join(', ')}) VALUES (${productFields.map(() => '?').join(', ')}) RETURNING id`).get(...productSqlValues(product));
+        return json(response, 201, { id: Number(result.id) });
       }
       const productMatch = pathname.match(/^\/api\/admin\/products\/(\d+)$/);
       if (productMatch && request.method === 'PUT') {
         const product = productFromBody(await readJson(request));
-        const result = db.prepare(`UPDATE products SET ${productFields.map((key) => `${key} = ?`).join(', ')} WHERE id = ?`)
+        const result = await db.prepare(`UPDATE products SET ${productFields.map((key) => `${key} = ?`).join(', ')} WHERE id = ?`)
           .run(...productSqlValues(product), Number(productMatch[1]));
         return result.changes ? json(response, 200, { ok: true }) : json(response, 404, { error: 'Carpet not found.' });
       }
       if (productMatch && request.method === 'DELETE') {
-        const result = db.prepare('UPDATE products SET is_active = 0 WHERE id = ?').run(Number(productMatch[1]));
+        const result = await db.prepare('UPDATE products SET is_active = 0 WHERE id = ?').run(Number(productMatch[1]));
         return result.changes ? json(response, 200, { ok: true }) : json(response, 404, { error: 'Carpet not found.' });
       }
-      if (request.method === 'GET' && pathname === '/api/admin/orders') return json(response, 200, adminOrderRows());
+      if (request.method === 'GET' && pathname === '/api/admin/orders') return json(response, 200, await adminOrderRows());
       const orderMatch = pathname.match(/^\/api\/admin\/orders\/(\d+)$/);
       if (orderMatch && request.method === 'PATCH') {
         const body = await readJson(request);
         if (!orderStatuses.has(body.status)) return json(response, 400, { error: 'Invalid order status.' });
-        const order = db.prepare('SELECT status FROM orders WHERE id = ?').get(Number(orderMatch[1]));
+        const order = await db.prepare('SELECT status FROM orders WHERE id = ?').get(Number(orderMatch[1]));
         if (!order) return json(response, 404, { error: 'Order not found.' });
         if (order.status === 'cancelled' && body.status !== 'cancelled') return json(response, 409, { error: 'Cancelled orders cannot be reopened.' });
         if (order.status !== 'cancelled' && body.status === 'cancelled') {
-          db.exec('BEGIN IMMEDIATE');
-          try {
-            for (const item of db.prepare('SELECT product_id, quantity FROM order_items WHERE order_id = ?').all(Number(orderMatch[1]))) {
-              if (item.product_id !== null) db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(item.quantity, item.product_id);
+          await db.transaction(async (transaction) => {
+            for (const item of await transaction.prepare('SELECT product_id, quantity FROM order_items WHERE order_id = ?').all(Number(orderMatch[1]))) {
+              if (item.product_id !== null) await transaction.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(item.quantity, item.product_id);
             }
-            db.prepare('UPDATE orders SET status = ? WHERE id = ?').run(body.status, Number(orderMatch[1]));
-            db.exec('COMMIT');
-          } catch (error) {
-            db.exec('ROLLBACK');
-            throw error;
-          }
+            await transaction.prepare('UPDATE orders SET status = ? WHERE id = ?').run(body.status, Number(orderMatch[1]));
+          });
         } else {
-          db.prepare('UPDATE orders SET status = ? WHERE id = ?').run(body.status, Number(orderMatch[1]));
+          await db.prepare('UPDATE orders SET status = ? WHERE id = ?').run(body.status, Number(orderMatch[1]));
         }
         return json(response, 200, { ok: true });
       }
       if (request.method === 'GET' && pathname === '/api/admin/customers') {
-        return json(response, 200, db.prepare(`SELECT users.id, users.name, users.email, users.phone, users.created_at,
+        return json(response, 200, await db.prepare(`SELECT users.id, users.name, users.email, users.phone, users.created_at,
           COUNT(orders.id) AS order_count, COALESCE(SUM(CASE WHEN orders.status != 'cancelled' THEN orders.total ELSE 0 END), 0) AS lifetime_value
           FROM users LEFT JOIN orders ON orders.user_id = users.id WHERE users.role = 'customer'
           GROUP BY users.id ORDER BY users.created_at DESC`).all());
@@ -410,8 +408,8 @@ export const server = createServer(async (request, response) => {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   server.listen(port, host, () => console.log(`Harshit International is running at http://${host}:${server.address().port}`));
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
-    server.close(() => {
-      db.close();
+    server.close(async () => {
+      await db.close();
       process.exit(0);
     });
   });

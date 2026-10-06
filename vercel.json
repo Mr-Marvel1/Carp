@@ -1,0 +1,33 @@
+{
+  "buildCommand": "npm run build",
+  "installCommand": "npm install",
+  "outputDirectory": "public",
+  "functions": {
+    "api/handler.mjs": {
+      "maxDuration": 30,
+      "includeFiles": "migrations/postgres/**/*.sql"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "^/api/(.*)$",
+      "destination": "/api/handler?__vercel_path=$1"
+    },
+    { "source": "/shop", "destination": "/index.html" },
+    { "source": "/products/:path*", "destination": "/index.html" },
+    { "source": "/cart", "destination": "/index.html" },
+    { "source": "/checkout", "destination": "/index.html" },
+    { "source": "/account", "destination": "/index.html" },
+    { "source": "/admin", "destination": "/index.html" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "X-Frame-Options", "value": "DENY" }
+      ]
+    }
+  ]
+}

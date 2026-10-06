@@ -6,6 +6,9 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env server.mjs",
     "dev": "node --watch --env-file-if-exists=.env server.mjs",
+    "seed:demo": "node --env-file-if-exists=.env scripts/seed-demo.mjs",
+    "migrate:postgres": "node --env-file-if-exists=.env scripts/migrate-sqlite-to-postgres.mjs",
+    "build": "node --env-file-if-exists=.env scripts/build.mjs",
     "test": "node --test"
   },
   "engines": {
